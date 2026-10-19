@@ -17,6 +17,84 @@ MCP_URL = "https://ftec5660.ngrok.app/mcp"
 MODEL_NAME = "deepseek-v4-flash"
 THRESHOLD = 0.5
 
+MAX_IN_FLIGHT = 3
+UNDECIDED = 0.5
+
+VERIFIER_PROMPT = """You are a KYC analyst checking a CV against the candidate's
+social profiles. The MCP tools you have are mock LinkedIn and Facebook and they
+are your ONLY source of facts. Never use your own knowledge of real companies,
+schools or people, and never browse the web. A tool returning no match means
+nothing was found, nothing else.
+
+WHAT TO CHECK
+Name, current city, every job (employer, title and the seniority its title
+implies, start year, end year or Present), every education entry (degree,
+school, field, graduation year) and every listed skill.
+
+HOW TO WORK
+1. Build a fingerprint from the CV first: full name, current city, every
+   employer, every school, every degree and field, every skill, and the years.
+2. Identify the person before you judge anything, with one precise query. Make
+   your first `search_linkedin_people` call with three arguments at once:
+   q = the CV's full name, location = the CV's city (never its country, that
+   drags in every namesake nationwide), industry = the CV's headline turned
+   into its industry word ("Legal Professional" -> "Legal", "AI Professional" ->
+   "AI"). That normally cuts hundreds of namesakes down to two or three. Never
+   put the industry or an employer into q: such a query has no exact hit, the
+   server falls back to fuzzy matching and answers with unrelated people in
+   other countries. Then open `get_linkedin_profile` on each survivor and keep
+   whoever explains the fingerprint: employers, school, degree, field, skills.
+   Drop anyone who matches only the name, the city and the skills. Anchoring on
+   the wrong namesake is the worst failure available here, because it
+   manufactures differences that are not real. Only if that first search is
+   empty do you widen once: same name and industry without a location, then the
+   country instead of the city. Facebook can break a tie through city, display
+   name or mutual friends.
+3. Once anchored, compare the CV against that profile field by field. LinkedIn
+   is the record and Facebook agrees with it, so treat Facebook as identity
+   evidence rather than somewhere else to find contradictions.
+4. Judge every difference before calling it a discrepancy.
+
+NOT DISCREPANCIES
+- Same thing said another way: "Bachelor of Science" for BSc, "Master of
+  Business Administration" for MBA, "UI/UX Design" for UI/UX, "Hong Kong" for
+  "Hong Kong SAR".
+- Anything about seniority that agrees or is simply left out. "Senior Engineer"
+  matches a job titled Engineer with seniority senior, and plain "Engineer"
+  matches that same job too, because a CV may leave the level unstated. It IS a
+  mismatch when the level contradicts the profile, e.g. the CV says "Senior
+  Analyst" while LinkedIn says title Analyst, seniority junior.
+- Listing fewer skills or fewer jobs than the profile. A CV is allowed to be
+  brief; it is not allowed to be false.
+- Missing job details, and anything inside job descriptions, headlines or
+  hometowns. Ignore those entirely.
+
+DISCREPANCIES
+A false claim of any kind: inflated title or seniority, shifted employment or
+graduation years, upgraded degree, employer or school that is not there, wrong
+city, a skill absent from the profile. One is enough to fail the CV.
+
+SCORE
+- 0.85 to 1.0: everything you could check is corroborated.
+- 0.6 to 0.8: corroborated, but you are unsure about the identity or a field.
+- Around 0.5: you could not find the candidate or could not decide.
+- 0.0 to 0.2: at least one claim contradicts the profiles. Use 0.1 when you can
+  name the contradiction.
+
+Answer with a single JSON object, no commentary around it:
+{"matched_linkedin_id": <int or null>,
+ "identity_confidence": <float 0 to 1>,
+ "discrepancies": ["Analyst at Microsoft: CV says Senior Analyst, LinkedIn says
+Analyst with seniority junior"],
+ "notes": "...",
+ "score": <float 0 to 1>}"""
+
+CV_PROMPT = """Verify this CV and reply with the JSON object.
+
+<candidate_cv>
+{cv_text}
+</candidate_cv>"""
+
 
 def load_env_file(path: Path = Path(".env")) -> None:
     """Load the simple KEY=VALUE entries used by this homework."""
@@ -82,9 +160,16 @@ def build_agent(tools: list[Any]) -> Any:
     Use the DeepSeek model named by ``MODEL_NAME``. The API key is loaded
     from .env.
     """
-    ### YOUR CODE HERE
-    _ = tools
-    return None
+    from langchain_deepseek import ChatDeepSeek
+    from langchain.agents import create_agent
+
+    llm = ChatDeepSeek(
+        model=MODEL_NAME,
+        temperature=0,
+        timeout=180,
+        max_retries=3,
+    )
+    return create_agent(llm, tools, system_prompt=VERIFIER_PROMPT)
 
 
 async def score_cvs(agent: Any, cvs: dict[str, str]) -> dict[str, float | None]:
@@ -105,9 +190,48 @@ async def score_cvs(agent: Any, cvs: dict[str, str]) -> dict[str, float | None]:
     about 3 CVs in flight (e.g. with ``asyncio.Semaphore(3)``): the MCP server is
     shared by the whole class.
     """
-    ### YOUR CODE HERE
-    _ = agent
-    return {name: None for name in cvs}
+    slots = asyncio.Semaphore(MAX_IN_FLIGHT)
+
+    async def verify(name: str, cv_text: str) -> tuple[str, float]:
+        async with slots:
+            payload = CV_PROMPT.format(cv_text=cv_text)
+            messages = [{"role": "user", "content": payload}]
+            try:
+                return name, score_from(await agent.ainvoke({"messages": messages}))
+            except Exception:
+                return name, UNDECIDED
+
+    scored = await asyncio.gather(*(verify(name, text) for name, text in cvs.items()))
+    return dict(scored)
+
+
+def reply_text(result: Any) -> str:
+    """Text of the agent's final answer."""
+    messages = result.get("messages", []) if isinstance(result, dict) else []
+    for message in reversed(messages):
+        content = message.get("content") if isinstance(message, dict) else getattr(message, "content", None)
+        if isinstance(content, list):
+            content = "".join(
+                block.get("text", "")
+                for block in content
+                if isinstance(block, dict) and isinstance(block.get("text"), str)
+            )
+        if isinstance(content, str) and content.strip():
+            return content
+    return ""
+
+
+def score_from(result: Any) -> float:
+    """Read the score out of the JSON the agent is asked to reply with."""
+    text = reply_text(result)
+    try:
+        blob = json.loads(text[text.index("{"):text.rindex("}") + 1])
+        score = float(blob["score"])
+        if 0.0 <= score <= 1.0:
+            return score
+    except Exception:
+        pass
+    return UNDECIDED
 
 
 # Everything below is provided runner/scoring code. No edits are needed.

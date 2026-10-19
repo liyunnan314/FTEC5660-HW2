@@ -93,7 +93,48 @@ attack the MCP server. See the homework description for the full rules.
 > to students: this is your report, see the homework description.
 
 ### Task 1
-> one paragraph describing your solution, and your results on `public_test`.
+
+One LangChain `deepseek-v4-flash` tool-calling agent per CV. Almost all of the
+logic lives in the system prompt rather than in Python, since the task is really
+about teaching the model the rules; `score_cvs` just fans the CVs out with
+`asyncio.Semaphore(3)` to stay within the shared MCP server's budget.
+
+Entity resolution turned out to be the hard part, not the comparison. A name on
+its own matches hundreds of people, and even adding the country barely helps:
+searching "Daniel Wilson" in Germany returns 20 unrelated Daniel Wilsons from
+other German cities. Passing the city *and* the industry together is what works.
+The CV's headline maps straight onto the industry ("Legal Professional" ->
+`Legal`), so `search_linkedin_people("Daniel Wilson", location="Munich",
+industry="Legal")` collapses those hundreds down to three. Putting the industry
+into `q` instead is actively harmful: such a query has no exact match, the
+server falls back to fuzzy matching, and it answers with people from other
+countries entirely. So the prompt opens with that one precise query, then pulls
+`get_linkedin_profile` on every survivor and anchors on whichever explains the
+CV's fingerprint — employers, school, degree, field, skills — discarding anyone
+who matches only the name, the city and the skills. Anchoring on the wrong
+namesake is the nastiest failure available here, because it invents
+discrepancies that are not real and fails CVs that are completely truthful.
+Facebook is used only as a tie-breaker, through city, display name or mutual
+friends, since it always agrees with LinkedIn.
+
+Once anchored, the agent walks the name, city, jobs, education and skills. The
+prompt is explicit that rewording is not lying ("Bachelor of Science" for
+`BSc`, "UI/UX Design" for `UI/UX`), and that a seniority that either agrees or
+is simply left off is fine while a seniority that contradicts is not: "Senior
+Engineer" against LinkedIn `Engineer` + `senior` is acceptable, and so is plain
+"Engineer", but "Senior Analyst" against `Analyst` + `junior` is inflated. It
+also ignores headlines, hometowns and job descriptions, which by construction
+are never where a discrepancy hides. LinkedIn is treated as the record and
+Facebook as identity evidence only.
+
+The agent replies with JSON holding the discrepancies it found plus a score. If
+that JSON cannot be parsed I fall back to 0.5, and each CV's API call is wrapped
+so a single failure cannot sink the whole run.
+
+On `public_test` it scores **7/7**, repeated identically across three
+consecutive runs at roughly 40 seconds each. The scores separate cleanly too:
+every truthful CV came back at 0.90–0.97 and every falsified one at 0.10, so
+nothing lands near the 0.5 boundary where a small wobble would flip a verdict.
 
 ### Task 2
 > the attack techniques you used and why you expect them to work.
