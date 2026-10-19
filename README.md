@@ -192,9 +192,9 @@ slightly more than the real one.
 
 ### Task 3
 
-My reflection on the AI paradoxes is written separately in
-[`task3/reflection.md`](task3/reflection.md). I drew it from what actually
-happened during the first two tasks rather than from abstract examples: how the
-Task 2 attack used a blind spot that the task specification itself defines, how
-scores that look precise turn out to be separating noise, and how my worst Task 1
-failure came from somewhere no amount of thinking ahead would have predicted.
+The reflection on the AI paradoxes is in
+[`task3/reflection.md`](task3/reflection.md). I wrote it from what happened while
+doing the first two tasks rather than from argument, mostly because I did not
+have much theory to bring to it. The short version is that putting the two tasks
+next to each other left me less certain about Task 1's result than I was on the
+afternoon I finished it.
