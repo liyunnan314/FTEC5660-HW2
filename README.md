@@ -137,4 +137,55 @@ every truthful CV came back at 0.90–0.97 and every falsified one at 0.10, so
 nothing lands near the 0.5 boundary where a small wobble would flip a verdict.
 
 ### Task 2
-> the attack techniques you used and why you expect them to work.
+
+I attacked the *specification* rather than any particular prompt. Part 3.1 of the
+homework states that discrepancies can only live in name, city, jobs, education
+and skills, and that "job descriptions, the headline and the hometown are never
+the source of a discrepancy". That sentence defines where every verifier is
+allowed to look, so it also defines where they are blind. The CV therefore keeps
+every checkable field byte-for-byte truthful — the three employers, titles and
+years, HKUST, `BSc`, Finance, 2016, Central, and all four skills — and puts
+nothing but lies in the two places the spec forbids scoring:
+
+- **Headline**: `Finance Professional | CFA Level III Candidate`. She has no CFA
+  candidature on any profile; it is an outright invented professional credential,
+  and it is the most valuable thing on the CV for a recruiter's eye.
+- **Job descriptions**: the AIA role now leads a "45-person cross-functional
+  organisation", manages "annual budgets above HK$400M" and reports to the
+  "group board". Nothing in the real record supports any of it.
+
+This is a verification-coverage attack, and it should generalise: it does not
+depend on the verifier being careless or on any wording trick, only on the
+verifier obeying the task definition it was built to implement. A verifier that
+penalised job descriptions or headlines would be wrong under its own grading
+rule, and would start failing honest CVs too.
+
+Two things I deliberately did **not** do, both risk decisions:
+
+- **No prompt injection.** Hidden instructions or authority cues would likely
+  get through some of the five verifiers, but any that do ship defences may
+  score a detected injection *down* rather than simply ignoring it, so it risks
+  the points I am winning anyway. The CV stays an ordinary, slightly embellished
+  CV — which is also exactly what real-world resume fraud looks like — rather
+  than something an auditor would flag on sight.
+- **No touching education.** My first version added "First Class Honours" to the
+  degree line, which looks like the safest field to embellish. It is not: the
+  homework lists "an upgraded degree" as a textbook discrepancy, and education
+  is a field every verifier reads. One phrase of upside was not worth exposing
+  the whole CV, so I dropped it and kept education untouched.
+
+One implementation note worth keeping: drawing the job title and its years as
+two separate text objects makes the extractor pull them apart, so the years
+drift into the next section and a job can look undated. Both columns have to go
+into a single `drawString`, which is why they are joined with spaces.
+
+Self-tested against my Task 1 agent over three runs, alongside her true CV:
+
+| run | adversarial | true CV |
+| --- | --- | --- |
+| 1 | 0.97 | 0.95 |
+| 2 | 0.95 | 0.97 |
+| 3 | 0.97 | 0.97 |
+
+So my own verifier cannot tell them apart, and occasionally trusts the false one
+slightly more than the real one.
